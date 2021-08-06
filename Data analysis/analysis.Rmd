@@ -1,0 +1,558 @@
+---
+title: Analysis of the effect of speaking style on speech segmentation by statistical
+  learning
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load packages
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(ggbeeswarm)
+library(readxl)
+library(plyr)
+library(dplyr)
+library(brms)
+library(bayesplot)
+library(tidyr)
+library(tidybayes)
+```
+
+```{r include=FALSE}
+# Run this to load all objects saved in the RData file, so that there is no need to run the whole code again
+load("all_objects.RData")
+```
+
+# Load data
+```{r}
+dat1 <- read_xlsx('/Users/adamguo/Desktop/Data analysis/data.xlsx')
+```
+
+# Data preprocessing
+## 1. Exclude timeouts
+```{r}
+# Exclucde timeouts (i.e., no responses)
+dat2 <- dat1[!is.na(dat1$Response), ]
+print(paste("No. of trials excluded:", nrow(dat1) - nrow(dat2)))
+```
+
+## 2. Exclude outliers
+```{r}
+# Outliers: subjects with accuracy 2 SDs below the mean of their condition
+
+# Calculate individual subjects' accuracy
+acc_by_sub <- aggregate(Accuracy ~ Subject + Condition, dat2, mean)
+
+# Compute SD and mean for each condition
+cond_sd <- aggregate(Accuracy ~ Condition, acc_by_sub, sd)
+cond_mean <- aggregate(Accuracy ~ Condition, acc_by_sub, mean)
+
+# Append SD and mean values to the dataframe acc_by_sub
+acc_by_sub <- merge(cond_sd, acc_by_sub, by = c("Condition"))
+acc_by_sub <- merge(cond_mean, acc_by_sub, by = c("Condition"))
+
+# Rename the dataframe columns
+names(acc_by_sub)[names(acc_by_sub) == "Accuracy"] <- "Mean"
+names(acc_by_sub)[names(acc_by_sub) == "Accuracy.x"] <- "SD"
+names(acc_by_sub)[names(acc_by_sub) == "Accuracy.y"] <- "Accuracy_sub"
+
+# Compute the exclusion threshold (2 SDs below the mean)
+acc_by_sub$Lower_bound <- acc_by_sub$Mean - 2 * acc_by_sub$SD
+
+# Subjects who are outliers:
+outliers <- acc_by_sub$Subject[acc_by_sub$Accuracy_sub < acc_by_sub$Lower_bound]
+outliers
+```
+
+```{r}
+# Now, exclude them from the data
+dat3 <- dat2[!dat2$Subject %in% outliers, ]
+
+print(paste("No. of trials excluded:", nrow(dat2) - nrow(dat3)))
+```
+
+# Prepare for analysis
+```{r}
+dat_fin <- dat3
+
+# Contrast factor levels
+dat_fin$LisCond <- as.factor(dat_fin$LisCond)
+contrasts(dat_fin$LisCond)
+
+dat_fin$Style <- as.factor(dat_fin$Style)
+dat_fin$Style <- relevel(dat_fin$Style, "Conversational")
+contrasts(dat_fin$Style)
+
+dat_fin$Group <- as.factor(dat_fin$Group)
+contrasts(dat_fin$Group)
+
+# Log-transform and scale RTs
+dat_fin$LogRT <- scale(log(dat_fin$RT))
+```
+
+# Run Bayesian mixed-effects logistic model
+```{r}
+# Set priors
+priors <- c(
+  set_prior("normal(0,10)", class = "Intercept"),
+  set_prior("normal(0,10)", class = "b"),
+  set_prior("normal(0,10)", class = "sd"),
+  set_prior("lkj(2)", class = "cor")
+  )
+```
+
+```{r eval=FALSE}
+# Run analysis
+bmix1 <- brm(Accuracy ~ Style*LisCond + LogRT + (1|Subject) + (Style*LisCond |AL_word) +
+               (1 + Style |Partword),
+             data = dat_fin, family = 'bernoulli',
+             warmup = 1000, chains = 4, iter = 2000,
+             prior = priors,
+             sample_prior = TRUE,
+             seed = 2020,
+             control = list(adapt_delta = 0.99, max_treedepth = 15))
+summary(bmix1)
+```
+
+```{r eval=FALSE}
+# Include Group (monolingual vs. bilingual) as a factor
+bmix2 <- brm(Accuracy ~ Style*LisCond*Group + LogRT + (1|Subject) + (Style*LisCond |AL_word) +
+               (1 + Style |Partword),
+             data = dat_fin, family = 'bernoulli',
+             warmup = 1000, chains = 4, iter = 2000,
+             prior = priors,
+             sample_prior = TRUE,
+             seed = 2020,
+             control = list(adapt_delta = 0.99, max_treedepth = 15))
+summary(bmix2)
+```
+
+# Results
+## Get marginal posterior distributions of the parameter values
+```{r}
+mar_posterior <- as.matrix(bmix1)
+
+# Get the marginal posteriors of the fixed-effect parameters only
+fixed_posterior <- mar_posterior[,1:7]
+fixed_posterior <- as.data.frame(fixed_posterior)
+
+# Rename columns
+names(fixed_posterior)[names(fixed_posterior) == "b_StyleClear:LisCondSNR_0"] <-
+  "b_StyleClearXLisCondSNR_0"
+names(fixed_posterior)[names(fixed_posterior) == "b_StyleClear:LisCondSNR_3"] <-
+  "b_StyleClearXLisCondSNR_3"
+
+# Plot marginal posteriors on all fixed-effect parameters using tidybayes
+color_scheme_set("gray")
+mar_posterior_fixed_plot <- fixed_posterior %>%
+  select(starts_with("b")) %>%
+  gather(Parameter, Value, b_Intercept:b_StyleClearXLisCondSNR_3) %>%
+  ggplot(aes(y = Parameter, x = Value)) +
+  stat_halfeyeh(point_interval = mean_qi, .width=0.95, normalize = "groups") +
+  theme_classic() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  coord_cartesian(xlim = c(-3, 4)) +
+  xlab("Parameter value") +
+  ylab("") +
+  scale_y_discrete(limits = c("b_LogRT", "b_StyleClearXLisCondSNR_0","b_StyleClearXLisCondSNR_3",
+                              "b_LisCondSNR_0", "b_LisCondSNR_3", "b_StyleClear","b_Intercept"),
+                     labels = c("b_LogRT" = expression(beta["LogRT"]),
+                                "b_StyleClearXLisCondSNR_0" = expression(beta["Style × LisCond (0 dB SNR)"]),
+                                "b_StyleClearXLisCondSNR_3" = expression(beta["Style × LisCond (+3 dB SNR)"]),
+                                "b_LisCondSNR_0" = expression(beta["LisCond (0 dB SNR)"]),
+                                "b_LisCondSNR_3" = expression(beta["LisCond (+3 dB SNR)"]),
+                                "b_StyleClear" = expression(beta["Style"]),
+                                "b_Intercept" = expression(beta["Intercept"]))) +
+  theme(axis.title.x = element_text(size=12),
+        axis.text.y = element_text(size=10, color="black"))
+mar_posterior_fixed_plot
+
+# Save graph
+pdf("/Users/adamguo/Desktop/Fig_3.pdf", width = 6, height = 4) 
+plot(mar_posterior_fixed_plot) 
+dev.off()
+```
+
+## Calculate posterior distribution of accuracy for each condition
+```{r}
+# Caclulate log-odds ratio for each conditon
+fixed_posterior$est_Quiet_conv <- fixed_posterior$b_Intercept
+fixed_posterior$est_Quiet_clear <- fixed_posterior$b_Intercept + fixed_posterior$b_StyleClear
+fixed_posterior$est_NM_0_conv <- fixed_posterior$b_Intercept + fixed_posterior$b_LisCondSNR_0
+fixed_posterior$est_NM_0_clear <- fixed_posterior$b_Intercept + fixed_posterior$b_StyleClear + fixed_posterior$b_LisCondSNR_0 + fixed_posterior$b_StyleClearXLisCondSNR_0
+fixed_posterior$est_NM_3_conv <- fixed_posterior$b_Intercept + fixed_posterior$b_LisCondSNR_3
+fixed_posterior$est_NM_3_clear <- fixed_posterior$b_Intercept + fixed_posterior$b_StyleClear + fixed_posterior$b_LisCondSNR_3 + fixed_posterior$b_StyleClearXLisCondSNR_3
+
+## Calculate accuracy for each condition
+fixed_posterior$acc_Quiet_conv <- plogis(fixed_posterior$est_Quiet_conv)
+fixed_posterior$acc_Quiet_clear <- plogis(fixed_posterior$est_Quiet_clear)
+fixed_posterior$acc_NM_0_conv <- plogis(fixed_posterior$est_NM_0_conv)
+fixed_posterior$acc_NM_0_clear <- plogis(fixed_posterior$est_NM_0_clear)
+fixed_posterior$acc_NM_3_conv <- plogis(fixed_posterior$est_NM_3_conv)
+fixed_posterior$acc_NM_3_clear <- plogis(fixed_posterior$est_NM_3_clear)
+```
+
+## Calculate the posterior distributions of accuracy drop from the quiet condition
+```{r}
+# Calculate posterior accuracy drop from the quiet condition for each style
+fixed_posterior$drop_NM_3_clear <- fixed_posterior$acc_NM_3_clear - fixed_posterior$acc_Quiet_clear
+fixed_posterior$drop_NM_0_clear <- fixed_posterior$acc_NM_0_clear - fixed_posterior$acc_Quiet_clear
+
+fixed_posterior$drop_NM_3_conv <- fixed_posterior$acc_NM_3_conv - fixed_posterior$acc_Quiet_conv
+fixed_posterior$drop_NM_0_conv <- fixed_posterior$acc_NM_0_conv - fixed_posterior$acc_Quiet_conv
+
+# Drop difference across styles for NM 3
+fixed_posterior$drop_NM_3_clear_conv_diff <- fixed_posterior$drop_NM_3_clear - fixed_posterior$drop_NM_3_conv
+
+# Drop difference across styles for NM 0
+fixed_posterior$drop_NM_0_clear_conv_diff <- fixed_posterior$drop_NM_0_clear - fixed_posterior$drop_NM_0_conv
+
+# Means and 95% credivle intervals (%)
+
+## Clear in noise at +3 dB SNR
+mean(fixed_posterior$drop_NM_3_clear) * 100
+quantile(fixed_posterior$drop_NM_3_clear, probs = c(0.025, 0.975)) * 100
+
+## Clear in noise at 0 dB SNR
+mean(fixed_posterior$drop_NM_0_clear) * 100
+quantile(fixed_posterior$drop_NM_0_clear, probs = c(0.025, 0.975)) * 100
+
+## Conversational in noise at +3 dB SNR
+mean(fixed_posterior$drop_NM_3_conv) * 100
+quantile(fixed_posterior$drop_NM_3_conv, probs = c(0.025, 0.975)) * 100
+
+## Conversational in noise at 0 dB SNR
+mean(fixed_posterior$drop_NM_0_conv) * 100
+quantile(fixed_posterior$drop_NM_0_conv, probs = c(0.025, 0.975)) * 100
+
+## Drop difference across style (NM 3)
+mean(fixed_posterior$drop_NM_3_clear_conv_diff) * 100
+quantile(fixed_posterior$drop_NM_3_clear_conv_diff, probs = c(0.025, 0.975)) * 100
+
+## Prob. that the reduction is greater for clear style (NM 3)
+sum(fixed_posterior$drop_NM_3_clear_conv_diff < 0) / length(fixed_posterior$drop_NM_3_clear_conv_diff)
+
+## Drop difference across style (NM 0)
+mean(fixed_posterior$drop_NM_0_clear_conv_diff) * 100
+quantile(fixed_posterior$drop_NM_0_clear_conv_diff, probs = c(0.025, 0.975)) * 100
+
+## Prob. that the reduction is greater for clear style (NM 0)
+sum(fixed_posterior$drop_NM_0_clear_conv_diff < 0) / length(fixed_posterior$drop_NM_0_clear_conv_diff)
+```
+
+## Calculate the posterior distributions of clear speech benefit
+```{r}
+# Calculate posterior clear speech benefit for each level of the LisCond factor
+fixed_posterior$csb_Quiet <- fixed_posterior$acc_Quiet_clear - fixed_posterior$acc_Quiet_conv
+fixed_posterior$csb_NM_0 <- fixed_posterior$acc_NM_0_clear - fixed_posterior$acc_NM_0_conv
+fixed_posterior$csb_NM_3 <- fixed_posterior$acc_NM_3_clear - fixed_posterior$acc_NM_3_conv
+
+# Convert to percentages
+fixed_posterior$csb_Quiet_per <- fixed_posterior$csb_Quiet * 100
+fixed_posterior$csb_NM_0_per <- fixed_posterior$csb_NM_0 * 100
+fixed_posterior$csb_NM_3_per <- fixed_posterior$csb_NM_3 * 100
+
+# Computer clear speech benefit difference (%) between the two noist conditions
+fixed_posterior$csb_NM_0_3_per_diff <- fixed_posterior$csb_NM_0_per - fixed_posterior$csb_NM_3_per
+
+# Mean and 95% credivle intervals (%)
+
+## Quiet
+mean(fixed_posterior$csb_Quiet_per)
+quantile(fixed_posterior$csb_Quiet_per, probs = c(0.025, 0.975))
+
+table(fixed_posterior$csb_Quiet_per <= 0)[2]/4000 ## Probablity that clear speech benefit is zero or below
+
+## In noise at +3 dB SNR
+mean(fixed_posterior$csb_NM_3_per)
+quantile(fixed_posterior$csb_NM_3_per, probs = c(0.025, 0.975))
+
+## In noise at 0 dB SNR
+mean(fixed_posterior$csb_NM_0_per)
+quantile(fixed_posterior$csb_NM_0_per, probs = c(0.025, 0.975))
+
+## Difference between 0 dB and +3 dB SNR in clear speech benefit
+mean(fixed_posterior$csb_NM_0_3_per_diff)
+quantile(fixed_posterior$csb_NM_0_3_per_diff, probs = c(0.025, 0.975))
+
+# Plot posterior distributions of clear speech benefit using tudybayes
+color_scheme_set("gray")
+posterior_csb_plot <- fixed_posterior %>%
+  select(ends_with("per")) %>%
+  gather(Parameter, Value, csb_Quiet_per:csb_NM_3_per) %>%
+  ggplot(aes(y = Parameter, x = Value)) +
+  stat_halfeyeh(point_interval = mean_qi, .width = 0.95) +
+  theme_classic() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  coord_cartesian(xlim = c(-25, 25)) +
+  xlab("Clear speech benefit (%)") +
+  ylab("") +
+  scale_y_discrete(limits = c("csb_NM_0_per","csb_NM_3_per","csb_Quiet_per"),
+                      labels = c("csb_NM_0_per" = "Noise-masked\n(0 dB SNR)",
+                                 "csb_NM_3_per" = "Noise-masked\n(+3 dB SNR)",
+                                 "csb_Quiet_per" = "Quiet")) +
+  theme(axis.title.x = element_text(size = 12),
+        axis.text.y = element_text(size = 10, color = "black"))
+
+posterior_csb_plot
+pdf("/Users/adamguo/Desktop/Fig_4.pdf", width = 6, height = 4)
+plot(posterior_csb_plot)
+dev.off()
+```
+
+# Boxplot (Figure 2)
+```{r}
+# Prepare data for plotting
+fig_dat <- aggregate(Accuracy ~ Subject + Condition + Style + LisCond, dat_fin, mean)
+
+# Calculate no. of observations of the conditions
+# no_NO <- xtabs(~Condition, dat_fin)
+# no_NO <- as.data.frame(no_NO)
+# no_NO <- no_NO[no_NO$Freq != 0,]
+
+# Calculate SE for the conditions
+condMeans <- aggregate(Accuracy ~ Condition, dat_fin, mean)
+# MeanSE_NO$SE <- sqrt(MeanSE_NO$Accuracy * (1 - MeanSE_NO$Accuracy) / no_NO$Freq)
+
+# Add condition means to the data frame for plotting
+fig_dat$Mean = 0
+fig_dat[fig_dat$Condition == "Quiet_clear",]$Mean <-
+  condMeans[condMeans$Condition == "Quiet_clear",]$Accuracy
+fig_dat[fig_dat$Condition == "Quiet_conv",]$Mean <-
+  condMeans[condMeans$Condition == "Quiet_conv",]$Accuracy
+
+fig_dat[fig_dat$Condition == "NM_0_clear",]$Mean <-
+  condMeans[condMeans$Condition == "NM_0_clear",]$Accuracy
+fig_dat[fig_dat$Condition == "NM_0_conv",]$Mean <-
+  condMeans[condMeans$Condition == "NM_0_conv",]$Accuracy
+
+fig_dat[fig_dat$Condition == "NM_3_clear",]$Mean <-
+  condMeans[condMeans$Condition == "NM_3_clear",]$Accuracy
+fig_dat[fig_dat$Condition == "NM_3_conv",]$Mean <-
+  condMeans[condMeans$Condition == "NM_3_conv",]$Accuracy
+
+# Order levels of Style and LisCond
+fig_dat$Style <- factor(fig_dat$Style, levels = c("Conversational", "Clear"))
+fig_dat$LisCond <- factor(fig_dat$LisCond, levels = c("Quiet", "SNR_3", "SNR_0"))
+
+# Now create the boxplot
+pd1 <- position_dodge(0.16)
+pd2 <- position_dodge(1.2)
+
+boxplot_fig <- ggplot(fig_dat) +
+  aes(x = LisCond, y = Accuracy * 100, color = Style, fill = Style, shape = Style) +
+  geom_beeswarm(cex = 1.5, size = 2.0, dodge.width = 1.0) +
+  stat_boxplot(geom = "errorbar", position = pd1, color = "black", width = 0.15) +
+  geom_boxplot(width = 0.15, position = pd1, color = "black", outlier.shape = NA) + 
+  geom_label(stat = 'summary', fun = mean, aes(label = round(..y.., 0)),
+                 color = "black", fill = "white", position = position_dodge(0.53), size = 3.5, alpha = 0.4) +
+  scale_fill_manual(values = c("#C0C0C0", "#5d5d5d")) +
+  scale_color_manual(values=  c("#C0C0C0", "#5d5d5d")) +
+  scale_x_discrete(labels = c("Quiet" = "Quiet",
+                              "SNR_3" = "Noise-masked\n(+3 dB SNR)",
+                              "SNR_0" = "Noise-masked\n(0 dB SNR)")) +
+  theme_classic() +
+  ggtitle("") +
+  xlab("") +
+  ylab("% Correct") + 
+  theme(text = element_text(size = 18),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        legend.position = c(0.2, 0.2),
+        legend.background = element_blank(),
+        plot.title = element_text(hjust = 0.70, face = "bold", size = 20),
+        axis.title = element_text(size = 20))
+boxplot_fig
+
+pdf("/Users/adamguo/Desktop/Fig_2.pdf", width = 10, height = 5) 
+plot(boxplot_fig)
+dev.off()
+```
+
+# Sensitivity analysis
+```{r}
+# Set priors with different degrees of uncertainty for fixed effectss
+priors_sa_1 <- c(
+  set_prior("normal(0,0.1)", class = "Intercept"),
+  set_prior("normal(0,0.1)", class = "b"),
+  set_prior("normal(0,10)", class = "sd"),
+  set_prior("lkj(2)", class = "cor")
+  )
+
+priors_sa_2 <- c(
+  set_prior("normal(0,1)", class = "Intercept"),
+  set_prior("normal(0,1)", class = "b"),
+  set_prior("normal(0,10)", class = "sd"),
+  set_prior("lkj(2)", class = "cor")
+  )
+
+priors_sa_3 <- c(
+  set_prior("normal(0,25)", class = "Intercept"),
+  set_prior("normal(0,25)", class = "b"),
+  set_prior("normal(0,10)", class = "sd"),
+  set_prior("lkj(2)", class = "cor")
+  )
+
+priors_sa_4 <- c(
+  set_prior("normal(0,50)", class = "Intercept"),
+  set_prior("normal(0,50)", class = "b"),
+  set_prior("normal(0,10)", class = "sd"),
+  set_prior("lkj(2)", class = "cor")
+  )
+```
+
+```{r}
+# Define a function for running the model
+run_bmix_sa <- function(priors_sa) {
+  bmix_sa <- brm(Accuracy ~ Style*LisCond + LogRT + (1|Subject) + (Style*LisCond |AL_word) +
+                   (1 + Style |Partword),
+                 data = dat_fin, family = 'bernoulli',
+                 warmup = 1000, chains = 4, iter = 2000,
+                 prior = priors_sa,
+                 sample_prior = TRUE,
+                 seed = 2020,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15))
+  return(bmix_sa)
+}
+```
+
+```{r eval=FALSE}
+# Run models
+bmix_sa_1 <- run_bmix_sa(priors_sa_1)
+bmix_sa_2 <- run_bmix_sa(priors_sa_2)
+bmix_sa_3 <- run_bmix_sa(priors_sa_3)
+bmix_sa_4 <- run_bmix_sa(priors_sa_4)
+```
+
+```{r}
+# Define a function for getting posteriors as done for bmix1
+get_posteriors <- function(bmix_sa) {
+  mar_posterior_sa <- as.matrix(bmix_sa)
+  
+  # Get the marginal posteriors of the fixed-effect parameters only
+  fixed_posterior_sa <- mar_posterior_sa[,1:7]
+  fixed_posterior_sa <- as.data.frame(fixed_posterior_sa)
+  
+  # Rename columns
+  names(fixed_posterior_sa)[names(fixed_posterior_sa) == "b_StyleClear:LisCondSNR_0"] <-
+  "b_StyleClearXLisCondSNR_0"
+  names(fixed_posterior_sa)[names(fixed_posterior_sa) == "b_StyleClear:LisCondSNR_3"] <-
+  "b_StyleClearXLisCondSNR_3"
+  
+  # Caclulate log-odds ratio for each conditon
+  fixed_posterior_sa$est_Quiet_conv <- fixed_posterior_sa$b_Intercept
+  fixed_posterior_sa$est_Quiet_clear <- fixed_posterior_sa$b_Intercept + fixed_posterior_sa$b_StyleClear
+  fixed_posterior_sa$est_NM_0_conv <- fixed_posterior_sa$b_Intercept + fixed_posterior_sa$b_LisCondSNR_0
+  fixed_posterior_sa$est_NM_0_clear <- fixed_posterior_sa$b_Intercept + fixed_posterior_sa$b_StyleClear +
+    fixed_posterior_sa$b_LisCondSNR_0 + fixed_posterior_sa$b_StyleClearXLisCondSNR_0
+  fixed_posterior_sa$est_NM_3_conv <- fixed_posterior_sa$b_Intercept + fixed_posterior_sa$b_LisCondSNR_3
+  fixed_posterior_sa$est_NM_3_clear <- fixed_posterior_sa$b_Intercept + fixed_posterior_sa$b_StyleClear +
+    fixed_posterior_sa$b_LisCondSNR_3 + fixed_posterior_sa$b_StyleClearXLisCondSNR_3
+  
+  # Calculate accuracy for each condition
+  fixed_posterior_sa$acc_Quiet_conv <- plogis(fixed_posterior_sa$est_Quiet_conv)
+  fixed_posterior_sa$acc_Quiet_clear <- plogis(fixed_posterior_sa$est_Quiet_clear)
+  fixed_posterior_sa$acc_NM_0_conv <- plogis(fixed_posterior_sa$est_NM_0_conv)
+  fixed_posterior_sa$acc_NM_0_clear <- plogis(fixed_posterior_sa$est_NM_0_clear)
+  fixed_posterior_sa$acc_NM_3_conv <- plogis(fixed_posterior_sa$est_NM_3_conv)
+  fixed_posterior_sa$acc_NM_3_clear <- plogis(fixed_posterior_sa$est_NM_3_clear)
+  
+  # Calculate posterior clear speech benefit for each level of the LisCond factor
+  fixed_posterior_sa$csb_Quiet <- fixed_posterior_sa$acc_Quiet_clear - fixed_posterior_sa$acc_Quiet_conv
+  fixed_posterior_sa$csb_NM_0 <- fixed_posterior_sa$acc_NM_0_clear - fixed_posterior_sa$acc_NM_0_conv
+  fixed_posterior_sa$csb_NM_3 <- fixed_posterior_sa$acc_NM_3_clear - fixed_posterior_sa$acc_NM_3_conv
+  
+  # Convert to percentages
+  fixed_posterior_sa$csb_Quiet_per <- fixed_posterior_sa$csb_Quiet * 100
+  fixed_posterior_sa$csb_NM_0_per <- fixed_posterior_sa$csb_NM_0 * 100
+  fixed_posterior_sa$csb_NM_3_per <- fixed_posterior_sa$csb_NM_3 * 100
+  
+  # Calculate posterior accuracy drop from the quiet condition for each style
+  fixed_posterior_sa$drop_NM_3_clear <- fixed_posterior_sa$acc_NM_3_clear -
+    fixed_posterior_sa$acc_Quiet_clear
+  fixed_posterior_sa$drop_NM_0_clear <- fixed_posterior_sa$acc_NM_0_clear -
+    fixed_posterior_sa$acc_Quiet_clear
+  fixed_posterior_sa$drop_NM_3_conv <- fixed_posterior_sa$acc_NM_3_conv -
+    fixed_posterior_sa$acc_Quiet_conv
+  fixed_posterior_sa$drop_NM_0_conv <- fixed_posterior_sa$acc_NM_0_conv -
+    fixed_posterior_sa$acc_Quiet_conv
+  
+  return(fixed_posterior_sa)
+}
+```
+
+```{r}
+# Get posteriors for the 4 models
+fixed_posterior_sa_1 <- get_posteriors(bmix_sa_1)
+fixed_posterior_sa_2 <- get_posteriors(bmix_sa_2)
+fixed_posterior_sa_3 <- get_posteriors(bmix_sa_3)
+fixed_posterior_sa_4 <- get_posteriors(bmix_sa_4)
+```
+
+```{r}
+# Get a dataframe containing posteriors of clear speech benefit of different models
+sa_data_csb_quiet <- cbind(c(rep("Normal(0, 0.1)", 4000),
+                   rep("Normal(0, 1)", 4000),
+                   rep("Normal(0, 10)", 4000),
+                   rep("Normal(0, 25)", 4000),
+                   rep("Normal(0, 50)", 4000)),
+                 rbind(fixed_posterior_sa_1["csb_Quiet_per"],
+                       fixed_posterior_sa_2["csb_Quiet_per"],
+                       fixed_posterior["csb_Quiet_per"], # The model reported in the paper
+                       fixed_posterior_sa_3["csb_Quiet_per"],
+                       fixed_posterior_sa_4["csb_Quiet_per"]))
+```
+
+```{r}
+# Rename the column specifying the prior used (as Prior), factorize Prior, and relevel it
+sa_data_csb_quiet <- sa_data_csb_quiet %>%
+  rename(Prior = 1) %>%
+  mutate(Prior = factor(Prior, levels = c("Normal(0, 0.1)",
+                                          "Normal(0, 1)",
+                                          "Normal(0, 10)",
+                                          "Normal(0, 25)",
+                                          "Normal(0, 50)")))
+```
+
+```{r}
+# 95% CIs of clear speech benefit in quiet
+quantile(sa_data_csb_quiet[sa_data_csb_quiet$Prior == "Normal(0, 0.1)",]$csb_Quiet_per,
+         probs = c(0.025, 0.975))
+quantile(sa_data_csb_quiet[sa_data_csb_quiet$Prior == "Normal(0, 1)",]$csb_Quiet_per,
+         probs = c(0.025, 0.975))
+quantile(sa_data_csb_quiet[sa_data_csb_quiet$Prior == "Normal(0, 25)",]$csb_Quiet_per,
+         probs = c(0.025, 0.975))
+quantile(sa_data_csb_quiet[sa_data_csb_quiet$Prior == "Normal(0, 50)",]$csb_Quiet_per,
+         probs = c(0.025, 0.975))
+```
+
+```{r}
+sa_csb_quiet_plot <- sa_data_csb_quiet %>%
+  ggplot(aes(y = Prior, x = csb_Quiet_per)) +
+  stat_halfeyeh(point_interval = mean_qi, .width = 0.95) +
+  theme_classic() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  xlab("Clear speech benefit (%) in quiet ") +
+  ylab("") +
+  coord_flip(xlim = c(-20, 30)) +
+  theme(axis.text.x = element_text(size = 12),
+        axis.title.y = element_text(size = 14))
+sa_csb_quiet_plot
+```
+
+```{r}
+# Save the plot
+pdf("/Users/adamguo/Desktop/SA_plot.pdf", width = 8, height = 4) 
+plot(sa_csb_quiet_plot)
+dev.off()
+```
+
+# Save all the objects created
+```{r}
+save.image(file = "all_objects.RData") 
+```
