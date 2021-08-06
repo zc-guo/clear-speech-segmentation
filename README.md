@@ -1,0 +1,2 @@
+# Speaking-clearly-improves-speech-segmentation-by-statistical-learning-under-optimal-listening-condit
+Data and analysis scripts for Data and analysis scripts for Guo, Z.-C., &amp; Smiljanic, R. (2021). "Speaking clearly improves speech segmentation by statistical learning under optimal listening conditions," Laboratory Phonology: Journal of the Association for Laboratory Phonology, 12(1), 14. doi:10.5334/labphon.310
